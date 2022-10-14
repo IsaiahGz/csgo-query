@@ -1,0 +1,19 @@
+{
+  "name": "csgo-query",
+  "version": "0.0.1",
+  "description": "A library used to query Source servers, such as CS:GO.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "tsc": "tsc",
+    "test": "jest --detectOpenHandles"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/jest": "^29.0.0",
+    "jest": "^28.1.3",
+    "ts-jest": "^28.0.8",
+    "typescript": "^4.8.2"
+  }
+}
