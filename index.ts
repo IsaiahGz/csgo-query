@@ -1,3 +1,5 @@
+// https://developer.valvesoftware.com/wiki/Server_queries
+
 import dgram from 'dgram'
 
 const mainHeader = Buffer.from([0xff, 0xff, 0xff, 0xff])
@@ -27,6 +29,18 @@ export interface A2S_Info {
 	spectatorServerName?: string,
 	keywords?: string,
 	gameId?: bigint
+}
+
+type PlayerInfo = {
+	index: number,
+	name: string,
+	score: number,
+	duration: number // Time in seconds the player has been connected to the server
+}
+
+export interface A2S_Player {
+	players: number,
+	playersInfo: [PlayerInfo?]
 }
 
 // Given a buffer and start index, find where the next string ends (terminated by null character)
@@ -113,6 +127,7 @@ export class SourceSocket {
 			// Create listener to receive response from server. Also handles challenge
 			this.socket.once('message', (initMessage) => {
 				// Check if a challenge was received
+				console.log(initMessage)
 				if (initMessage[4] === 0x41) {
 					const challenge = Buffer.concat([request, initMessage.subarray(5)])
 					this.socket.once('message', (finalMessage) => resolve(finalMessage))
@@ -129,8 +144,13 @@ export class SourceSocket {
 				}
 			})
 
+			// Some requests need FF at the end of the initial message in order to receive a challenge
+			let tempRequest = request
+			if  (requestType === 'a2s_player') {
+				tempRequest = Buffer.concat([request, mainHeader])
+			}
 			// Send request
-			this.socket.send(request, this.remotePort, this.remoteAddress, (err) => {
+			this.socket.send(tempRequest, this.remotePort, this.remoteAddress, (err) => {
 				if (err) reject(err)
 			})
 		})
@@ -139,101 +159,134 @@ export class SourceSocket {
 
 	// Sends a2s_info to server and returns an object
 	async getInfo(): Promise<Error | A2S_Info> {
-		let serverInfo = await this.sendRequestRaw('a2s_info')
-		if (serverInfo instanceof Buffer) {
-			const protocol = serverInfo[5].toFixed()
+		const serverInfo = await this.sendRequestRaw('a2s_info')
+		if (serverInfo instanceof Error) return Promise.reject(serverInfo)
+		
+		const protocol = serverInfo[5].toFixed()
 
-			const nameEnd = findStringEnd(serverInfo, 6)
-			const name = serverInfo.toString('utf8', 6, nameEnd)
-			const mapEnd = findStringEnd(serverInfo, nameEnd + 1)
-			const map = serverInfo.toString('utf-8', nameEnd + 1, mapEnd)
-			const folderEnd = findStringEnd(serverInfo, mapEnd + 1)
-			const folder = serverInfo.toString('utf-8', mapEnd + 1, folderEnd)
-			const gameEnd = findStringEnd(serverInfo, folderEnd + 1)
-			const game = serverInfo.toString('utf-8', folderEnd + 1, gameEnd)
+		const nameEnd = findStringEnd(serverInfo, 6)
+		const name = serverInfo.toString('utf8', 6, nameEnd)
+		const mapEnd = findStringEnd(serverInfo, nameEnd + 1)
+		const map = serverInfo.toString('utf-8', nameEnd + 1, mapEnd)
+		const folderEnd = findStringEnd(serverInfo, mapEnd + 1)
+		const folder = serverInfo.toString('utf-8', mapEnd + 1, folderEnd)
+		const gameEnd = findStringEnd(serverInfo, folderEnd + 1)
+		const game = serverInfo.toString('utf-8', folderEnd + 1, gameEnd)
 
-			const id = serverInfo.readUInt16LE(gameEnd + 1) // Two bytes long
-			const players = serverInfo.readUInt8(gameEnd + 3)
-			const maxPlayers = serverInfo.readUInt8(gameEnd + 4)
-			const bots = serverInfo.readUInt8(gameEnd + 5)
+		const id = serverInfo.readUInt16LE(gameEnd + 1) // Two bytes long
+		const players = serverInfo.readUInt8(gameEnd + 3)
+		const maxPlayers = serverInfo.readUInt8(gameEnd + 4)
+		const bots = serverInfo.readUInt8(gameEnd + 5)
 
-			let serverType: A2S_Info['serverType']
-			switch (serverInfo[gameEnd + 6]) {
-				case 0x64:
-					serverType = 'dedicated'
-					break
-				case 0x6c:
-					serverType = 'listen'
-					break
-				default:
-					serverType = 'SourceTV'
-			}
+		let serverType: A2S_Info['serverType']
+		switch (serverInfo[gameEnd + 6]) {
+			case 0x64:
+				serverType = 'dedicated'
+				break
+			case 0x6c:
+				serverType = 'listen'
+				break
+			default:
+				serverType = 'SourceTV'
+		}
 
-			let environment: A2S_Info['environment']
-			switch (serverInfo[gameEnd + 7]) {
-				case 0x6c:
-					environment = 'linux'
-					break
-				case 0x77:
-					environment = 'windows'
-					break
-				default:
-					environment = 'mac'
-			}
-			
-			const visibility = serverInfo[gameEnd + 8] === 0x00 ? false : true
-			const vac = serverInfo[gameEnd + 9] === 0x00 ? false : true
+		let environment: A2S_Info['environment']
+		switch (serverInfo[gameEnd + 7]) {
+			case 0x6c:
+				environment = 'linux'
+				break
+			case 0x77:
+				environment = 'windows'
+				break
+			default:
+				environment = 'mac'
+		}
+		
+		const visibility = serverInfo[gameEnd + 8] === 0x00 ? false : true
+		const vac = serverInfo[gameEnd + 9] === 0x00 ? false : true
 
-			const versionLength = findStringEnd(serverInfo, gameEnd + 10)
-			const version = serverInfo.toString('utf-8', gameEnd + 10, versionLength)
-			const edf = serverInfo.readUInt8(versionLength + 1)
+		const versionLength = findStringEnd(serverInfo, gameEnd + 10)
+		const version = serverInfo.toString('utf-8', gameEnd + 10, versionLength)
+		const edf = serverInfo.readUInt8(versionLength + 1)
 
-			// Assign what is known so far
-			const a2sInfo: A2S_Info = {
-				protocol,
-				name,
-				map,
-				folder,
-				game,
-				id,
-				players,
-				maxPlayers,
-				bots,
-				serverType,
-				environment,
-				visibility,
-				vac,
-				version,
-				edf
-			}
+		// Assign what is known so far
+		const a2sInfo: A2S_Info = {
+			protocol,
+			name,
+			map,
+			folder,
+			game,
+			id,
+			players,
+			maxPlayers,
+			bots,
+			serverType,
+			environment,
+			visibility,
+			vac,
+			version,
+			edf
+		}
 
-			// Deconstruct EDF (Extra Data Flag)
-			let currentEdfIndex = versionLength + 2
-			if (edf & 0x80) {
-				a2sInfo.port = serverInfo.readUInt16LE(currentEdfIndex) // Two bytes
-				currentEdfIndex += 2
-			}
-			if (edf & 0x10) {
-				a2sInfo.steamId = serverInfo.readBigUInt64LE(currentEdfIndex) // Eight bytes
-				currentEdfIndex += 8
-			}
-			if (edf & 0x40) {
-				a2sInfo.spectatorPort = serverInfo.readUInt16LE(currentEdfIndex) // Two bytes
-				currentEdfIndex += 2
-				const spectatorLength = findStringEnd(serverInfo, currentEdfIndex)
-				a2sInfo.spectatorServerName = serverInfo.toString('utf-8', currentEdfIndex, spectatorLength)
-				currentEdfIndex += (spectatorLength - currentEdfIndex) + 1
-			}
-			if (edf & 0x20) {
-				const keywordsLength = findStringEnd(serverInfo, currentEdfIndex)
-				a2sInfo.keywords = serverInfo.toString('utf-8', currentEdfIndex, keywordsLength)
-				currentEdfIndex += (keywordsLength - currentEdfIndex) + 1
-			}
-			if (edf & 0x01) {
-				a2sInfo.gameId = serverInfo.readBigUInt64LE(currentEdfIndex)
-			}
+		// Deconstruct EDF (Extra Data Flag)
+		let currentEdfIndex = versionLength + 2
+		if (edf & 0x80) {
+			a2sInfo.port = serverInfo.readUInt16LE(currentEdfIndex) // Two bytes
+			currentEdfIndex += 2
+		}
+		if (edf & 0x10) {
+			a2sInfo.steamId = serverInfo.readBigUInt64LE(currentEdfIndex) // Eight bytes
+			currentEdfIndex += 8
+		}
+		if (edf & 0x40) {
+			a2sInfo.spectatorPort = serverInfo.readUInt16LE(currentEdfIndex) // Two bytes
+			currentEdfIndex += 2
+			const spectatorLength = findStringEnd(serverInfo, currentEdfIndex)
+			a2sInfo.spectatorServerName = serverInfo.toString('utf-8', currentEdfIndex, spectatorLength)
+			currentEdfIndex += (spectatorLength - currentEdfIndex) + 1
+		}
+		if (edf & 0x20) {
+			const keywordsLength = findStringEnd(serverInfo, currentEdfIndex)
+			a2sInfo.keywords = serverInfo.toString('utf-8', currentEdfIndex, keywordsLength)
+			currentEdfIndex += (keywordsLength - currentEdfIndex) + 1
+		}
+		if (edf & 0x01) {
+			a2sInfo.gameId = serverInfo.readBigUInt64LE(currentEdfIndex)
+		}
 
-			return Promise.resolve(a2sInfo)
-		} else return Promise.reject(serverInfo)
+		return Promise.resolve(a2sInfo)
+	}
+
+	async getPlayers(): Promise<Error | A2S_Player> {
+		const serverInfo = await this.sendRequestRaw('a2s_player')
+		console.log(serverInfo)
+		if (serverInfo instanceof Error) return Promise.reject(serverInfo)
+		const players = serverInfo.readUInt8(5)
+		const playersInfo: A2S_Player['playersInfo'] = []
+		let playerIndex = 0
+		let currentOffset = 6
+		console.log(players)
+		while (playerIndex < players - 1) {
+			const pIndex = serverInfo.readUint8(currentOffset)
+			const pNameLength = findStringEnd(serverInfo, currentOffset + 1)
+			const pName = serverInfo.toString('utf-8', currentOffset + 1, pNameLength)
+			currentOffset = pNameLength + 1
+			const pScore = serverInfo.readInt32LE(currentOffset) // 4 bytes
+			const pDuration = serverInfo.readFloatLE(currentOffset + 4) // 4 bytes
+			currentOffset += 8
+			playersInfo.push({
+				index: pIndex,
+				name: pName,
+				score: pScore,
+				duration: pDuration
+			})
+			playerIndex++
+		}
+		const a2sPlayer: A2S_Player = {
+			players,
+			playersInfo
+		}
+		console.log(a2sPlayer)
+		return Promise.resolve(a2sPlayer)
 	}
 }
